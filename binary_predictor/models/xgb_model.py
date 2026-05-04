@@ -44,8 +44,13 @@ class XGBModel:
         if n_neg > 0:
             self.params["scale_pos_weight"] = n_neg / n_pos
 
-        # Extract early_stopping_rounds from params (not a constructor param in newer xgb)
-        early_stopping = self.params.pop("early_stopping_rounds", XGB_EARLY_STOPPING)
+        # Extract early_stopping_rounds from params if we don't have validation data
+        early_stopping = self.params.get("early_stopping_rounds", XGB_EARLY_STOPPING)
+        
+        if X_val is not None and y_val is not None:
+            self.params["early_stopping_rounds"] = early_stopping
+        elif "early_stopping_rounds" in self.params:
+            del self.params["early_stopping_rounds"]
 
         self.model = xgb.XGBClassifier(**self.params)
 
@@ -54,24 +59,14 @@ class XGBModel:
             fit_params["eval_set"] = [(X_val, y_val)]
             fit_params["verbose"] = False
 
-        # Use callbacks for early stopping
-        callbacks = [
-            xgb.callback.EarlyStopping(
-                rounds=early_stopping,
-                metric_name="logloss",
-                save_best=True,
-            )
-        ]
-
         self.model.fit(
             X_train, y_train,
-            callbacks=callbacks if X_val is not None else None,
             **fit_params,
         )
 
         self.feature_importances_ = self.model.feature_importances_
 
-        # Restore early_stopping_rounds to params
+        # Restore early_stopping_rounds to params if we removed it
         self.params["early_stopping_rounds"] = early_stopping
 
         n_trees = self.model.best_iteration if hasattr(self.model, 'best_iteration') else self.params.get('n_estimators', 0)

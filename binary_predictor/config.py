@@ -46,7 +46,7 @@ XGB_PARAMS = {
     'reg_alpha': 0.1,
     'reg_lambda': 1.0,
     'scale_pos_weight': 1,
-    'use_label_encoder': False,
+
     'eval_metric': 'logloss',
     'random_state': 42
 }
@@ -130,13 +130,19 @@ DASHBOARD_PORT = 8501
 LOG_FILE = LOG_DIR / "app.log"
 LOG_LEVEL = "INFO"
 
-# ─── Historical Data ─────────────────────────────────────────
-HISTORICAL_YEARS = 2         # How many years of data to fetch
-DUKASCOPY_BASE_URL = "https://datafeed.dukascopy.com/datafeed"
+# ─── Historical Data (Binance) ───────────────────────────────
+HISTORICAL_YEARS = 2
 
-# ─── Dukascopy instrument mapping ────────────────────────────
-DUKASCOPY_INSTRUMENTS = {
-    "EURUSD": "EURUSD",
-    "GBPUSD": "GBPUSD",
-    "USDJPY": "USDJPY",
+BINANCE_BASE_URL = "https://api.binance.com/api/v3/klines"
+
+BINANCE_SYMBOL_MAP = {
+    "EURUSD": "EURUSDT",
+    "GBPUSD": "GBPUSDT",
+    "USDJPY": "USDTJPY",
+}
+
+BINANCE_INTERVAL_MAP = {
+    "1M": "1m",
+    "5M": "5m",
+    "15M": "15m",
 }

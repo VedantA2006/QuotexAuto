@@ -1,12 +1,10 @@
 """
-Historical data fetcher — Dukascopy + TrueFX.
+Historical data fetcher — Binance klines API.
 
-Downloads 1-minute OHLCV candle data and stores as CSV.
+Downloads 1-minute (or 5-minute) OHLCV candle data from Binance
+and stores as CSV. No API key required.
 """
 
-import io
-import lzma
-import struct
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,9 +19,10 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from config import (
     DATA_DIR,
-    DUKASCOPY_BASE_URL,
-    DUKASCOPY_INSTRUMENTS,
     HISTORICAL_YEARS,
+    BINANCE_BASE_URL,
+    BINANCE_SYMBOL_MAP,
+    BINANCE_INTERVAL_MAP,
 )
 from utils.logger import setup_logger, get_logger
 
@@ -31,219 +30,179 @@ logger = setup_logger("binary_predictor")
 
 
 # ═══════════════════════════════════════════════════════════════
-# A) Dukascopy fetcher
+# Binance klines fetcher
 # ═══════════════════════════════════════════════════════════════
 
-def _decode_bi5(data: bytes, point: float = 1e-5) -> list[dict]:
-    """
-    Decode a Dukascopy .bi5 (LZMA-compressed) 1-minute candle file.
-
-    Each record is 24 bytes:
-        4 bytes: time offset in seconds from start of day (uint32)
-        4 bytes: open  (uint32, multiply by point)
-        4 bytes: high  (uint32)
-        4 bytes: low   (uint32)
-        4 bytes: close (uint32)
-        4 bytes: volume (float32)
-    """
-    try:
-        raw = lzma.decompress(data)
-    except lzma.LZMAError:
-        return []
-
-    record_size = 24
-    records = []
-    for i in range(0, len(raw), record_size):
-        if i + record_size > len(raw):
-            break
-        chunk = raw[i : i + record_size]
-        ts_offset, o, h, l, c, v = struct.unpack(">IIIIIf", chunk)
-        records.append(
-            {
-                "time_offset": ts_offset,
-                "open": o * point,
-                "high": h * point,
-                "low": l * point,
-                "close": c * point,
-                "volume": round(v, 2),
-            }
-        )
-    return records
-
-
-def _get_point(pair: str) -> float:
-    """Point multiplier for decoding prices."""
-    if "JPY" in pair.upper():
-        return 1e-3
-    return 1e-5
-
-
-def fetch_dukascopy_day(
+def fetch_binance_klines(
     pair: str,
-    date: datetime,
-    session: Optional[requests.Session] = None,
+    interval: str = "1M",
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    limit_per_request: int = 1000,
+    sleep_between: float = 0.1,
 ) -> pd.DataFrame:
     """
-    Fetch 1-minute candle data for a single day from Dukascopy.
+    Fetch OHLCV candle data from Binance klines API.
 
-    Returns an OHLCV DataFrame or empty DataFrame on failure.
+    Parameters
+    ----------
+    pair : str
+        Internal pair name, e.g. "EURUSD"
+    interval : str
+        Timeframe key from BINANCE_INTERVAL_MAP, e.g. "1M", "5M"
+    start_date : datetime
+        Start of the date range (UTC). Defaults to `HISTORICAL_YEARS` ago.
+    end_date : datetime
+        End of the date range (UTC). Defaults to now.
+    limit_per_request : int
+        Max candles per API call (Binance caps at 1000).
+    sleep_between : float
+        Seconds to sleep between requests to respect rate limits.
+
+    Returns
+    -------
+    DataFrame with columns [time, open, high, low, close, volume]
     """
-    instrument = DUKASCOPY_INSTRUMENTS.get(pair.upper(), pair.upper())
-    # Dukascopy months are 0-indexed
-    url = (
-        f"{DUKASCOPY_BASE_URL}/{instrument}/"
-        f"{date.year}/{date.month - 1:02d}/{date.day:02d}/"
-        f"BID_candles_min_1.bi5"
-    )
-
-    sess = session or requests.Session()
-    try:
-        resp = sess.get(url, timeout=15)
-        if resp.status_code != 200 or len(resp.content) == 0:
-            return pd.DataFrame()
-    except requests.RequestException as e:
-        logger.warning(f"Dukascopy request failed for {pair} {date.date()}: {e}")
+    symbol = BINANCE_SYMBOL_MAP.get(pair.upper())
+    if symbol is None:
+        logger.error(f"No Binance symbol mapping for pair: {pair}")
         return pd.DataFrame()
 
-    point = _get_point(pair)
-    records = _decode_bi5(resp.content, point)
-    if not records:
-        return pd.DataFrame()
+    bi_interval = BINANCE_INTERVAL_MAP.get(interval.upper(), "1m")
 
-    day_start = datetime(date.year, date.month, date.day, tzinfo=timezone.utc)
-    rows = []
-    for r in records:
-        ts = day_start + timedelta(seconds=r["time_offset"])
-        rows.append(
-            {
-                "time": ts,
-                "open": r["open"],
-                "high": r["high"],
-                "low": r["low"],
-                "close": r["close"],
-                "volume": r["volume"],
-            }
-        )
-    df = pd.DataFrame(rows)
-    return df
+    if end_date is None:
+        end_date = datetime.now(timezone.utc)
+    if start_date is None:
+        start_date = end_date - timedelta(days=365 * HISTORICAL_YEARS)
 
+    start_ms = int(start_date.timestamp() * 1000)
+    end_ms = int(end_date.timestamp() * 1000)
 
-def fetch_dukascopy_range(
-    pair: str,
-    start_date: datetime,
-    end_date: datetime,
-    sleep_between: float = 0.15,
-) -> pd.DataFrame:
-    """
-    Fetch multiple days of 1-minute data from Dukascopy.
-    """
     logger.info(
-        f"Fetching Dukascopy data: {pair} from {start_date.date()} to {end_date.date()}"
+        f"Fetching Binance klines: {symbol} ({pair}) | {bi_interval} | "
+        f"{start_date.date()} → {end_date.date()}"
     )
-    all_frames = []
-    current = start_date
-    total_days = (end_date - start_date).days
+
+    all_rows = []
+    current_ms = start_ms
+
+    # Estimate total requests for progress bar
+    if bi_interval == "1m":
+        candle_ms = 60_000
+    elif bi_interval == "5m":
+        candle_ms = 300_000
+    elif bi_interval == "15m":
+        candle_ms = 900_000
+    else:
+        candle_ms = 60_000
+
+    total_candles = (end_ms - start_ms) // candle_ms
+    total_requests = max(total_candles // limit_per_request, 1)
+
     session = requests.Session()
     session.headers.update(
         {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     )
 
-    with tqdm(total=total_days, desc=f"Downloading {pair}") as pbar:
-        while current <= end_date:
-            # Skip weekends
-            if current.weekday() < 5:
-                df = fetch_dukascopy_day(pair, current, session)
-                if not df.empty:
-                    all_frames.append(df)
-                time.sleep(sleep_between)
-            current += timedelta(days=1)
-            pbar.update(1)
+    with tqdm(total=total_requests, desc=f"Downloading {pair}") as pbar:
+        while current_ms < end_ms:
+            params = {
+                "symbol": symbol,
+                "interval": bi_interval,
+                "startTime": current_ms,
+                "endTime": end_ms,
+                "limit": limit_per_request,
+            }
 
-    if not all_frames:
+            try:
+                resp = session.get(BINANCE_BASE_URL, params=params, timeout=15)
+                resp.raise_for_status()
+                data = resp.json()
+            except requests.RequestException as e:
+                logger.warning(f"Binance request failed: {e}")
+                time.sleep(1)
+                continue
+            except ValueError as e:
+                logger.warning(f"Binance JSON decode error: {e}")
+                time.sleep(1)
+                continue
+
+            if not data or len(data) == 0:
+                break
+
+            for kline in data:
+                # Binance kline format:
+                # [open_time, open, high, low, close, volume,
+                #  close_time, quote_vol, trades, taker_buy_base,
+                #  taker_buy_quote, ignore]
+                all_rows.append({
+                    "time": datetime.fromtimestamp(
+                        kline[0] / 1000, tz=timezone.utc
+                    ),
+                    "open": float(kline[1]),
+                    "high": float(kline[2]),
+                    "low": float(kline[3]),
+                    "close": float(kline[4]),
+                    "volume": float(kline[5]),
+                })
+
+            # Move start cursor past the last candle received
+            last_open_time = data[-1][0]
+            current_ms = last_open_time + candle_ms
+
+            pbar.update(1)
+            time.sleep(sleep_between)
+
+    if not all_rows:
         logger.warning(f"No data fetched for {pair}")
         return pd.DataFrame()
 
-    result = pd.concat(all_frames, ignore_index=True)
-    result = result.sort_values("time").reset_index(drop=True)
-    result = result.drop_duplicates(subset=["time"])
-    logger.info(f"Fetched {len(result):,} candles for {pair}")
-    return result
+    df = pd.DataFrame(all_rows)
+    df = df.sort_values("time").drop_duplicates(subset=["time"]).reset_index(drop=True)
+    logger.info(f"Fetched {len(df):,} candles for {pair}")
+    return df
 
 
-def download_historical(
+def fetch_and_save(
     pair: str,
+    interval: str = "1M",
     years: int = HISTORICAL_YEARS,
-    save: bool = True,
 ) -> pd.DataFrame:
     """
-    Download `years` years of 1-min data for `pair` from Dukascopy.
-    Saves to CSV in DATA_DIR.
+    Fetch full date range of candles from Binance and save to CSV.
+
+    Parameters
+    ----------
+    pair : str
+        Internal pair name, e.g. "EURUSD"
+    interval : str
+        Timeframe key, e.g. "1M", "5M"
+    years : int
+        Years of history to download
+
+    Returns
+    -------
+    DataFrame with OHLCV data.
     """
     end_date = datetime.now(timezone.utc) - timedelta(days=1)
     start_date = end_date - timedelta(days=365 * years)
 
-    df = fetch_dukascopy_range(pair, start_date, end_date)
-
-    if save and not df.empty:
-        out_path = DATA_DIR / f"{pair.upper()}_1min.csv"
-        df.to_csv(out_path, index=False)
-        logger.info(f"Saved {len(df):,} rows → {out_path}")
-
-    return df
-
-
-# ═══════════════════════════════════════════════════════════════
-# B) TrueFX fetcher (backup)
-# ═══════════════════════════════════════════════════════════════
-
-def parse_truefx_ticks(filepath: str | Path) -> pd.DataFrame:
-    """
-    Parse a TrueFX tick CSV into 1-minute OHLC bars.
-
-    TrueFX format: Currency,DateTime,Bid,Ask
-    e.g.: EUR/USD,20240101 00:00:00.123,1.10234,1.10245
-    """
-    logger.info(f"Parsing TrueFX tick file: {filepath}")
-    df = pd.read_csv(
-        filepath,
-        header=None,
-        names=["pair", "datetime", "bid", "ask"],
+    df = fetch_binance_klines(
+        pair, interval=interval,
+        start_date=start_date, end_date=end_date,
     )
-    df["time"] = pd.to_datetime(df["datetime"], format="%Y%m%d %H:%M:%S.%f", utc=True)
-    df["mid"] = (df["bid"] + df["ask"]) / 2.0
 
-    # Resample to 1-minute bars
-    df = df.set_index("time")
-    ohlc = df["mid"].resample("1T").ohlc().dropna()
-    ohlc.columns = ["open", "high", "low", "close"]
-    ohlc["volume"] = df["mid"].resample("1T").count()
-    ohlc = ohlc.reset_index()
-    logger.info(f"Parsed {len(ohlc):,} 1-min bars from TrueFX")
-    return ohlc
+    if not df.empty:
+        bi_interval = BINANCE_INTERVAL_MAP.get(interval.upper(), "1m")
+        out_path = DATA_DIR / f"{pair.upper()}_{bi_interval}.csv"
+        df.to_csv(out_path, index=False)
+        logger.info(f"Saved {len(df):,} rows -> {out_path}")
 
-
-def load_truefx_directory(directory: str | Path, pair: str) -> pd.DataFrame:
-    """
-    Load all TrueFX CSVs for a pair from a directory, combine and save.
-    """
-    directory = Path(directory)
-    files = sorted(directory.glob(f"*{pair}*"))
-    if not files:
-        logger.warning(f"No TrueFX files found for {pair} in {directory}")
-        return pd.DataFrame()
-
-    frames = [parse_truefx_ticks(f) for f in files]
-    df = pd.concat(frames, ignore_index=True).sort_values("time").reset_index(drop=True)
-    df = df.drop_duplicates(subset=["time"])
-
-    out_path = DATA_DIR / f"{pair.upper()}_truefx_1min.csv"
-    df.to_csv(out_path, index=False)
-    logger.info(f"Saved TrueFX data: {len(df):,} rows → {out_path}")
     return df
 
 
 # ═══════════════════════════════════════════════════════════════
-# C) Aggregator (resample)
+# Aggregator (resample)
 # ═══════════════════════════════════════════════════════════════
 
 def resample_to_timeframe(
@@ -251,8 +210,17 @@ def resample_to_timeframe(
     timeframe: str = "5T",
 ) -> pd.DataFrame:
     """
-    Resample 1-min bars to a coarser timeframe.
+    Resample OHLCV bars to a coarser timeframe.
     Always handles UTC alignment.
+
+    Parameters
+    ----------
+    df : DataFrame with columns [time, open, high, low, close, volume]
+    timeframe : pandas offset alias, e.g. '5T', '15T', '1H'
+
+    Returns
+    -------
+    Resampled DataFrame.
     """
     df = df.copy()
     df["time"] = pd.to_datetime(df["time"], utc=True)
@@ -266,14 +234,49 @@ def resample_to_timeframe(
     return resampled.reset_index()
 
 
-def load_cached_data(pair: str) -> Optional[pd.DataFrame]:
-    """Load previously downloaded CSV data for a pair."""
-    path = DATA_DIR / f"{pair.upper()}_1min.csv"
-    if path.exists():
-        df = pd.read_csv(path, parse_dates=["time"])
-        logger.info(f"Loaded cached data: {pair} — {len(df):,} rows")
-        return df
+def load_cached_data(pair: str, interval: str = "1M") -> Optional[pd.DataFrame]:
+    """
+    Load previously downloaded CSV data for a pair.
+
+    Parameters
+    ----------
+    pair : str
+        Internal pair name, e.g. "EURUSD"
+    interval : str
+        Timeframe key, e.g. "1M", "5M"
+
+    Returns
+    -------
+    DataFrame or None if not found.
+    """
+    bi_interval = BINANCE_INTERVAL_MAP.get(interval.upper(), "1m")
+    path = DATA_DIR / f"{pair.upper()}_{bi_interval}.csv"
+
+    # Also check legacy filename format
+    legacy_path = DATA_DIR / f"{pair.upper()}_1min.csv"
+
+    for p in [path, legacy_path]:
+        if p.exists():
+            df = pd.read_csv(p, parse_dates=["time"])
+            logger.info(f"Loaded cached data: {pair} - {len(df):,} rows from {p.name}")
+            return df
+
     return None
+
+
+# ═══════════════════════════════════════════════════════════════
+# Convenience alias (used by train.py)
+# ═══════════════════════════════════════════════════════════════
+
+def download_historical(
+    pair: str,
+    years: int = HISTORICAL_YEARS,
+    save: bool = True,
+) -> pd.DataFrame:
+    """
+    Download historical data. Alias for fetch_and_save.
+    """
+    return fetch_and_save(pair, interval="1M", years=years)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -283,9 +286,10 @@ def load_cached_data(pair: str) -> Optional[pd.DataFrame]:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Download historical OHLCV data")
+    parser = argparse.ArgumentParser(description="Download historical OHLCV data from Binance")
     parser.add_argument("--pair", default="EURUSD", help="Currency pair")
+    parser.add_argument("--interval", default="1M", help="Timeframe: 1M, 5M, 15M")
     parser.add_argument("--years", type=int, default=2, help="Years of history")
     args = parser.parse_args()
 
-    download_historical(args.pair, args.years)
+    fetch_and_save(args.pair, args.interval, args.years)

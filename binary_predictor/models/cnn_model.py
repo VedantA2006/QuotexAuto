@@ -29,8 +29,12 @@ def _build_cnn_model(seq_length: int, n_seq_features: int, n_tabular_features: i
     Input 2: Tabular engineered features → Dense pathway
     """
     try:
+        try:
+            import keras
+            from keras import layers, Model, Input
+        except ImportError:
+            from tensorflow.keras import layers, Model, Input
         import tensorflow as tf
-        from tensorflow.keras import layers, Model, Input
     except ImportError:
         logger.error("TensorFlow not installed. Install with: pip install tensorflow")
         raise
@@ -136,6 +140,10 @@ class CNNModel:
         
         X_train/X_val should be the FULL DataFrames (with OHLCV + features).
         """
+        try:
+            import keras
+        except ImportError:
+            pass
         import tensorflow as tf
 
         # Prepare sequences from training data
@@ -271,8 +279,12 @@ class CNNModel:
         path = Path(path)
 
         try:
-            import tensorflow as tf
-            self.model = tf.keras.models.load_model(str(path / "keras_model.keras"))
+            try:
+                import keras
+                self.model = keras.models.load_model(str(path / "keras_model.keras"))
+            except ImportError:
+                import tensorflow as tf
+                self.model = tf.keras.models.load_model(str(path / "keras_model.keras"))
         except Exception as e:
             logger.warning(f"Could not load CNN Keras model: {e}")
             self.model = None
