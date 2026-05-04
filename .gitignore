@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+logs/
+binary_predictor/data/raw/
+binary_predictor/models/saved/
+binary_predictor/signals_log.csv
+binary_predictor/backtest/*.html
+.pytest_cache/
+.DS_Store

@@ -1,0 +1,35 @@
+# Binary Options Candle Direction Predictor — Dependencies
+# Install: pip install -r requirements.txt
+
+# ── Core ML ───────────────────────────────────
+xgboost>=2.0.0
+lightgbm>=4.0.0
+scikit-learn>=1.3.0
+tensorflow>=2.14.0
+
+# ── Data & Analysis ──────────────────────────
+pandas>=2.1.0
+numpy>=1.24.0
+ta>=0.11.0
+shap>=0.43.0
+
+# ── Visualization ────────────────────────────
+plotly>=5.18.0
+streamlit>=1.30.0
+
+# ── Scheduling & Async ───────────────────────
+apscheduler>=3.10.0
+
+# ── Quotex API ───────────────────────────────
+pyquotex>=1.0.0
+
+# ── Networking ───────────────────────────────
+requests>=2.31.0
+
+# ── Utilities ────────────────────────────────
+tqdm>=4.66.0
+joblib>=1.3.0
+python-dotenv>=1.0.0
+
+# ── Regime Detection (optional) ─────────────
+hmmlearn>=0.3.0
