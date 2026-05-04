@@ -1,12 +1,12 @@
 """
-live.py — Main live trading entry point.
+live.py -- Main live trading entry point (multi-pair, multi-timeframe).
 
-Loads saved models, starts live candle fetcher and signal generator,
-and launches the Streamlit dashboard in a subprocess.
+Loads saved models, starts live candle fetcher and signal generator
+for all pairs x timeframes, and launches the Streamlit dashboard.
 
 Usage:
     python live.py
-    python live.py --asset EURUSD --timeframe 1M
+    python live.py --asset EURUSD GBPUSD --timeframe 1M 5M
     python live.py --no-dashboard
 """
 
@@ -21,6 +21,7 @@ from pathlib import Path
 from config import (
     ASSETS,
     TIMEFRAME,
+    TIMEFRAMES,
     MIN_CONFIDENCE,
     MODEL_DIR,
     BASE_DIR,
@@ -37,18 +38,18 @@ logger = setup_logger(
 
 class LiveRunner:
     """
-    Orchestrates live signal generation + dashboard.
+    Orchestrates multi-pair, multi-timeframe live signal generation + dashboard.
     """
 
     def __init__(
         self,
         pairs: list[str],
-        timeframe: str,
+        timeframes: list[str],
         min_confidence: float,
         launch_dashboard: bool = True,
     ):
         self.pairs = pairs
-        self.timeframe = timeframe
+        self.timeframes = timeframes
         self.min_confidence = min_confidence
         self.launch_dashboard = launch_dashboard
         self._dashboard_proc = None
@@ -56,11 +57,14 @@ class LiveRunner:
 
     async def run(self):
         """Start all components."""
+        n_channels = len(self.pairs) * len(self.timeframes)
+
         logger.info("=" * 60)
-        logger.info("  BINARY PREDICTOR — LIVE MODE")
-        logger.info(f"  Assets:     {self.pairs}")
-        logger.info(f"  Timeframe:  {self.timeframe}")
-        logger.info(f"  Confidence: ≥{self.min_confidence}")
+        logger.info("  BINARY PREDICTOR -- LIVE MODE")
+        logger.info(f"  Assets:      {self.pairs}")
+        logger.info(f"  Timeframes:  {self.timeframes}")
+        logger.info(f"  Channels:    {n_channels} ({len(self.pairs)} pairs x {len(self.timeframes)} TFs)")
+        logger.info(f"  Confidence:  >={self.min_confidence}")
         logger.info("=" * 60)
 
         # Verify models exist
@@ -74,12 +78,12 @@ class LiveRunner:
         if self.launch_dashboard:
             self._start_dashboard()
 
-        # Start signal generator
+        # Start signal generator with multi-TF support
         from signals.generator import SignalGenerator
 
         generator = SignalGenerator(
             pairs=self.pairs,
-            timeframe=self.timeframe,
+            timeframes=self.timeframes,
             min_confidence=self.min_confidence,
         )
 
@@ -99,7 +103,7 @@ class LiveRunner:
             self._stop_dashboard()
             return
 
-        logger.info("✓ Live system running. Press Ctrl+C to stop.")
+        logger.info(f"[OK] Live system running with {n_channels} channels. Press Ctrl+C to stop.")
 
         try:
             await generator.run()
@@ -147,7 +151,7 @@ class LiveRunner:
                 cwd=str(BASE_DIR),
             )
             logger.info(
-                f"✓ Dashboard started at http://localhost:{DASHBOARD_PORT}"
+                f"[OK] Dashboard started at http://localhost:{DASHBOARD_PORT}"
             )
         except Exception as e:
             logger.warning(f"Could not start dashboard: {e}")
@@ -172,16 +176,15 @@ class LiveRunner:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Binary Options Candle Direction Predictor — Live Mode"
+        description="Binary Options Candle Direction Predictor -- Live Mode"
     )
     parser.add_argument(
         "--asset", type=str, nargs="+", default=ASSETS,
         help="Currency pair(s) to trade",
     )
     parser.add_argument(
-        "--timeframe", type=str, default=TIMEFRAME,
-        choices=["1M", "5M"],
-        help="Candle timeframe",
+        "--timeframe", type=str, nargs="+", default=TIMEFRAMES,
+        help="Candle timeframe(s): 1M 5M (multiple allowed)",
     )
     parser.add_argument(
         "--min-confidence", type=float, default=MIN_CONFIDENCE,
@@ -195,7 +198,7 @@ def main():
 
     runner = LiveRunner(
         pairs=[a.upper() for a in args.asset],
-        timeframe=args.timeframe,
+        timeframes=[t.upper() for t in args.timeframe],
         min_confidence=args.min_confidence,
         launch_dashboard=not args.no_dashboard,
     )

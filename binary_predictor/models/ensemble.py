@@ -2,6 +2,7 @@
 Weighted ensemble of XGBoost + LightGBM + CNN models.
 
 Implements confidence filtering — the single most important accuracy lever.
+Includes multi-timeframe signal merging for agreement-based boosting.
 """
 
 import numpy as np
@@ -22,6 +23,7 @@ from config import (
     ADAPTIVE_HIGH_WR,
     ADAPTIVE_HIGH_CONF,
     ADAPTIVE_LOW_CONF,
+    MTF_AGREEMENT_BOOST,
 )
 from models.xgb_model import XGBModel
 from models.lgbm_model import LGBMModel
@@ -165,6 +167,81 @@ class EnsembleModel:
         signals = self.predict_with_confidence(X, X_full)
         return signals[-1] if signals else {"action": "SKIP", "confidence": 0}
 
+    # ------------------------------------------------------------------
+    # Multi-Timeframe Signal Merging
+    # ------------------------------------------------------------------
+
+    def merge_mtf_signals(self, signal_1m: dict, signal_5m: dict) -> dict:
+        """
+        Merge 1M and 5M signals.
+        - Same direction + both above threshold -> boost confidence, return TRADE
+        - Different directions -> return SKIP
+        - Only one signal available -> return that signal as-is
+
+        Parameters
+        ----------
+        signal_1m : dict or None
+            Signal from the 1M timeframe.
+        signal_5m : dict or None
+            Signal from the 5M timeframe.
+
+        Returns
+        -------
+        Merged signal dict with 'mtf_agreement' field.
+        """
+        # If only one timeframe available, return as-is
+        if signal_1m is None and signal_5m is None:
+            return {"action": "SKIP", "confidence": 0, "direction": "—",
+                    "mtf_agreement": False, "reason": "No signal"}
+
+        if signal_1m is None:
+            result = signal_5m.copy()
+            result["mtf_agreement"] = False
+            result["timeframe"] = "5M"
+            return result
+
+        if signal_5m is None:
+            result = signal_1m.copy()
+            result["mtf_agreement"] = False
+            result["timeframe"] = "1M"
+            return result
+
+        # Both timeframes available — check agreement
+        dir_1m = signal_1m.get("direction", "")
+        dir_5m = signal_5m.get("direction", "")
+        conf_1m = signal_1m.get("confidence", 0)
+        conf_5m = signal_5m.get("confidence", 0)
+
+        if dir_1m == dir_5m:
+            # Agreement — boost confidence
+            avg_conf = (conf_1m + conf_5m) / 2
+            boosted = min(avg_conf + MTF_AGREEMENT_BOOST, 0.99)
+            threshold = self._get_current_threshold()
+
+            merged = {
+                "direction": dir_1m,
+                "confidence": round(boosted, 4),
+                "probability": signal_1m.get("probability", 0.5),
+                "action": "TRADE" if boosted >= threshold else "SKIP",
+                "mtf_agreement": True,
+                "conf_1m": round(conf_1m, 4),
+                "conf_5m": round(conf_5m, 4),
+                "reason": f"MTF agree ({conf_1m:.1%}+{conf_5m:.1%}+{MTF_AGREEMENT_BOOST:.0%} boost)",
+            }
+            return merged
+        else:
+            # Disagreement — skip regardless of individual confidence
+            return {
+                "direction": dir_1m,
+                "confidence": round(max(conf_1m, conf_5m), 4),
+                "probability": signal_1m.get("probability", 0.5),
+                "action": "SKIP",
+                "mtf_agreement": False,
+                "conf_1m": round(conf_1m, 4),
+                "conf_5m": round(conf_5m, 4),
+                "reason": f"MTF disagree (1M={dir_1m}, 5M={dir_5m})",
+            }
+
     def _get_current_threshold(self) -> float:
         """
         Get the adaptive confidence threshold based on recent performance.
@@ -270,7 +347,7 @@ class EnsembleModel:
             "min_confidence": self.min_confidence,
         }
         joblib.dump(meta, path / "ensemble_meta.pkl")
-        logger.info(f"Ensemble saved → {path}")
+        logger.info(f"Ensemble saved -> {path}")
         return path
 
     def load(self, path: Optional[Path] = None) -> "EnsembleModel":
@@ -293,5 +370,5 @@ class EnsembleModel:
             self.min_confidence = meta.get("min_confidence", MIN_CONFIDENCE)
 
         self._models_loaded = True
-        logger.info(f"Ensemble loaded ← {path}")
+        logger.info(f"Ensemble loaded <- {path}")
         return self

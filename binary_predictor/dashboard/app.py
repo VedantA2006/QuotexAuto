@@ -1,8 +1,8 @@
 """
-Streamlit Dashboard — Binary Options Candle Direction Predictor.
+Streamlit Dashboard -- Binary Options Multi-Pair Signal Monitor.
 
-Dark-themed dashboard with live signals, performance tracking,
-model health monitoring, and settings controls.
+Dark-themed dashboard with multi-pair signal table, performance tracking,
+model health monitoring, and per-pair status.
 """
 
 import json
@@ -24,9 +24,11 @@ from config import (
     MIN_CONFIDENCE,
     BASE_DIR,
     DASHBOARD_REFRESH_SECONDS,
+    MAX_DAILY_TRADES_PER_PAIR,
+    MAX_LOSS_STREAK,
 )
 
-# ─── Page Config ──────────────────────────────────────────────
+# --- Page Config -----------------------------------------------------------
 st.set_page_config(
     page_title="Binary Predictor Dashboard",
     page_icon="🎯",
@@ -34,7 +36,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ─── Custom CSS ───────────────────────────────────────────────
+# --- Custom CSS ------------------------------------------------------------
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
@@ -99,6 +101,19 @@ st.markdown("""
         letter-spacing: 0.5px;
     }
 
+    .pair-row-trade {
+        background: rgba(0, 212, 170, 0.06);
+        border-left: 3px solid #00d4aa;
+    }
+    .pair-row-skip-conf {
+        background: rgba(255, 165, 2, 0.04);
+        border-left: 3px solid #ffa502;
+    }
+    .pair-row-skip-streak {
+        background: rgba(255, 71, 87, 0.06);
+        border-left: 3px solid #ff4757;
+    }
+
     div[data-testid="stSidebar"] {
         background: rgba(15, 15, 46, 0.95);
     }
@@ -122,10 +137,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ─── Data Loading ─────────────────────────────────────────────
+# --- Data Loading ----------------------------------------------------------
+
+def load_all_latest_signals() -> dict:
+    """Load latest signals for all pairs from shared JSON."""
+    signal_file = BASE_DIR / "latest_signals.json"
+    if signal_file.exists():
+        try:
+            return json.loads(signal_file.read_text())
+        except Exception:
+            pass
+    return {}
+
 
 def load_latest_signal() -> dict:
-    """Load the latest signal from shared JSON file."""
+    """Load the single latest signal (backward compat)."""
     signal_file = BASE_DIR / "latest_signal.json"
     if signal_file.exists():
         try:
@@ -149,10 +175,10 @@ def load_signals_log() -> pd.DataFrame:
     return pd.DataFrame()
 
 
-# ─── Sidebar Settings ────────────────────────────────────────
+# --- Sidebar Settings ------------------------------------------------------
 
 with st.sidebar:
-    st.markdown("## ⚙️ Settings")
+    st.markdown("## Settings")
 
     min_conf = st.slider(
         "Min Confidence Threshold",
@@ -163,19 +189,19 @@ with st.sidebar:
         help="Only show signals above this confidence level",
     )
 
-    selected_asset = st.selectbox("Asset", ASSETS, index=0)
-
-    selected_tf = st.radio("Timeframe", ["1M", "5M"], index=0, horizontal=True)
-
-    skip_asian = st.checkbox("Skip Asian Session", value=True)
+    selected_pairs = st.multiselect(
+        "Filter Pairs",
+        ASSETS,
+        default=ASSETS,
+    )
 
     auto_refresh = st.checkbox("Auto-Refresh (30s)", value=True)
 
     st.markdown("---")
-    st.markdown("### 📊 Model Info")
+    st.markdown("### Model Info")
     model_meta_path = MODEL_DIR / "ensemble_meta.pkl"
     if model_meta_path.exists():
-        st.success("Models loaded ✓")
+        st.success("Models loaded")
         st.caption(f"Path: `{MODEL_DIR}`")
     else:
         st.warning("No trained models found")
@@ -184,133 +210,172 @@ with st.sidebar:
     st.markdown("---")
     st.markdown(
         "<p style='color:#555;font-size:0.75em;text-align:center'>"
-        "Binary Predictor v1.0</p>",
+        "Binary Predictor v2.0 | Multi-Pair MTF</p>",
         unsafe_allow_html=True,
     )
 
 
-# ─── Main Layout ─────────────────────────────────────────────
+# --- Main Layout -----------------------------------------------------------
 
 st.markdown(
     "<h1 style='text-align:center;background:linear-gradient(135deg,#00d4aa,#7c5cfc);"
     "-webkit-background-clip:text;-webkit-text-fill-color:transparent;"
-    "font-size:2.2em;margin-bottom:5px'>🎯 Binary Predictor</h1>"
+    "font-size:2.2em;margin-bottom:5px'>Binary Predictor</h1>"
     "<p style='text-align:center;color:#888;margin-bottom:30px'>"
-    "Candle Direction Predictor for Quotex</p>",
+    "Multi-Pair Multi-Timeframe Signal Monitor</p>",
     unsafe_allow_html=True,
 )
 
-# ─── Tab Layout ───────────────────────────────────────────────
-tab_signal, tab_perf, tab_health = st.tabs([
-    "📡 Live Signal", "📈 Performance", "🔧 Model Health"
+# --- Tab Layout ------------------------------------------------------------
+tab_signals, tab_perf, tab_health = st.tabs([
+    "Live Signals", "Performance", "Model Health"
 ])
 
-# ═══════════════════════════════════════════════
-# TAB 1: Live Signal
-# ═══════════════════════════════════════════════
-with tab_signal:
-    signal = load_latest_signal()
+# =====================================================
+# TAB 1: Live Signals -- Multi-Pair Table
+# =====================================================
+with tab_signals:
+    all_signals = load_all_latest_signals()
 
-    col1, col2 = st.columns([2, 1])
+    # Summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+
+    active_trades = sum(
+        1 for p, s in all_signals.items()
+        if s.get("action") == "TRADE" and p in selected_pairs
+    )
+    active_pairs = len([p for p in selected_pairs if p in all_signals])
+    blocked_pairs = sum(
+        1 for p, s in all_signals.items()
+        if s.get("action") == "SKIP" and "streak" in s.get("reason", "").lower()
+        and p in selected_pairs
+    )
 
     with col1:
-        if signal:
-            direction = signal.get("direction", "—")
-            confidence = signal.get("confidence", 0)
-            action = signal.get("action", "SKIP")
-            reason = signal.get("reason", "")
-            sig_time = signal.get("time", "—")
-
-            if action == "TRADE":
-                css_class = "signal-up" if direction == "UP" else "signal-down"
-                arrow = "⬆" if direction == "UP" else "⬇"
-                color = "#00d4aa" if direction == "UP" else "#ff4757"
-            else:
-                css_class = "signal-skip"
-                arrow = "⏸"
-                color = "#ffa502"
-
-            st.markdown(f"""
-            <div class="signal-card {css_class}">
-                <div style="color:#888;font-size:0.85em;margin-bottom:8px">
-                    {signal.get('asset', selected_asset)} • {sig_time}
-                </div>
-                <div class="big-arrow" style="color:{color}">{arrow}</div>
-                <div style="font-size:2em;font-weight:800;color:{color};margin:8px 0">
-                    {direction if action == "TRADE" else "WAITING"}
-                </div>
-                <div class="conf-text" style="color:{color}">
-                    {confidence:.1%} confidence
-                </div>
-                <div style="color:#888;margin-top:12px;font-size:0.85em">
-                    {reason}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown("""
-            <div class="signal-card signal-skip">
-                <div class="big-arrow" style="color:#555">⏳</div>
-                <div style="font-size:1.5em;color:#555;font-weight:600">
-                    No Signal Yet
-                </div>
-                <div style="color:#666;margin-top:8px;font-size:0.85em">
-                    Start the live engine to receive signals
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="metric-box">
+            <div class="metric-value" style="color:#00d4aa">{active_trades}</div>
+            <div class="metric-label">Active Signals</div>
+        </div>
+        """, unsafe_allow_html=True)
 
     with col2:
-        # Confidence gauge
-        conf_val = signal.get("confidence", 0) if signal else 0
-        fig_gauge = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=conf_val * 100,
-            number={"suffix": "%", "font": {"size": 28, "color": "#e0e0e0"}},
-            gauge={
-                "axis": {"range": [50, 100], "tickcolor": "#555"},
-                "bar": {"color": "#7c5cfc"},
-                "bgcolor": "rgba(255,255,255,0.03)",
-                "steps": [
-                    {"range": [50, 55.6], "color": "rgba(255,71,87,0.2)"},
-                    {"range": [55.6, 62], "color": "rgba(255,165,2,0.2)"},
-                    {"range": [62, 100], "color": "rgba(0,212,170,0.15)"},
-                ],
-                "threshold": {
-                    "line": {"color": "#00d4aa", "width": 3},
-                    "thickness": 0.8,
-                    "value": min_conf * 100,
-                },
-            },
-        ))
-        fig_gauge.update_layout(
-            height=200,
-            margin=dict(l=20, r=20, t=30, b=10),
-            paper_bgcolor="rgba(0,0,0,0)",
-            font={"color": "#e0e0e0"},
-        )
-        st.plotly_chart(fig_gauge, use_container_width=True)
+        st.markdown(f"""
+        <div class="metric-box">
+            <div class="metric-value" style="color:#7c5cfc">{active_pairs}</div>
+            <div class="metric-label">Pairs Reporting</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-        # Countdown placeholder
-        if signal:
-            tf_sec = 60 if selected_tf == "1M" else 300
-            now = datetime.now(timezone.utc)
-            elapsed = now.second if tf_sec == 60 else (now.minute * 60 + now.second) % tf_sec
-            remaining = tf_sec - elapsed
-            st.markdown(
-                f"<div class='metric-box'>"
-                f"<div class='metric-value' style='color:#7c5cfc'>{remaining}s</div>"
-                f"<div class='metric-label'>Next candle</div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+    with col3:
+        st.markdown(f"""
+        <div class="metric-box">
+            <div class="metric-value" style="color:#ffa502">{len(selected_pairs) - blocked_pairs}</div>
+            <div class="metric-label">Pairs Active Today</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-    # Recent signals table
+    with col4:
+        now_utc = datetime.now(timezone.utc)
+        remaining_1m = 60 - now_utc.second
+        st.markdown(f"""
+        <div class="metric-box">
+            <div class="metric-value" style="color:#7c5cfc">{remaining_1m}s</div>
+            <div class="metric-label">Next Candle</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("### Signal Table")
+
+    # Build table data
+    table_rows = []
+    for pair in selected_pairs:
+        sig = all_signals.get(pair, {})
+        if not sig:
+            table_rows.append({
+                "Pair": pair,
+                "1M Signal": "---",
+                "5M Signal": "---",
+                "MTF Agreement": "---",
+                "Confidence": 0.0,
+                "Action": "WAITING",
+            })
+            continue
+
+        direction = sig.get("direction", "---")
+        confidence = sig.get("confidence", 0)
+        action = sig.get("action", "SKIP")
+        mtf = sig.get("mtf_agreement", False)
+        conf_1m = sig.get("conf_1m", confidence)
+        conf_5m = sig.get("conf_5m", 0)
+        tf = sig.get("timeframe", "1M")
+
+        if tf == "MTF" or mtf:
+            sig_1m = f"{direction} ({conf_1m:.1%})" if conf_1m else "---"
+            sig_5m = f"{direction} ({conf_5m:.1%})" if conf_5m else "---"
+        else:
+            sig_1m = f"{direction} ({confidence:.1%})" if tf == "1M" else "---"
+            sig_5m = f"{direction} ({confidence:.1%})" if tf == "5M" else "---"
+
+        table_rows.append({
+            "Pair": pair,
+            "1M Signal": sig_1m,
+            "5M Signal": sig_5m,
+            "MTF Agreement": "YES" if mtf else "NO",
+            "Confidence": confidence,
+            "Action": action,
+        })
+
+    if table_rows:
+        df_table = pd.DataFrame(table_rows)
+
+        # Color-code via styling
+        def color_action(val):
+            if val == "TRADE":
+                return "background-color: rgba(0,212,170,0.15); color: #00d4aa; font-weight: 700"
+            elif val == "SKIP":
+                return "background-color: rgba(255,165,2,0.08); color: #ffa502"
+            else:
+                return "color: #555"
+
+        def color_mtf(val):
+            if val == "YES":
+                return "color: #00d4aa; font-weight: 700"
+            elif val == "NO":
+                return "color: #ff4757"
+            return "color: #555"
+
+        def color_conf(val):
+            if isinstance(val, (int, float)):
+                if val >= 0.7:
+                    return "color: #00d4aa; font-weight: 700"
+                elif val >= 0.62:
+                    return "color: #7c5cfc"
+                elif val > 0:
+                    return "color: #ffa502"
+            return "color: #555"
+
+        styled = df_table.style.applymap(
+            color_action, subset=["Action"]
+        ).applymap(
+            color_mtf, subset=["MTF Agreement"]
+        ).applymap(
+            color_conf, subset=["Confidence"]
+        ).format({
+            "Confidence": "{:.1%}",
+        })
+
+        st.dataframe(styled, use_container_width=True, hide_index=True, height=380)
+    else:
+        st.info("No signals yet. Start the live engine to receive signals.")
+
+    # Recent signals log
     st.markdown("### Recent Signals")
     signals_df = load_signals_log()
     if not signals_df.empty:
-        recent = signals_df.tail(10).iloc[::-1]
-        display_cols = [c for c in ["time", "asset", "direction", "confidence", "action", "reason"] if c in recent.columns]
+        recent = signals_df.tail(15).iloc[::-1]
+        display_cols = [c for c in ["time", "asset", "direction", "confidence", "timeframe", "action", "reason"]
+                       if c in recent.columns]
         st.dataframe(
             recent[display_cols],
             use_container_width=True,
@@ -319,9 +384,10 @@ with tab_signal:
     else:
         st.info("No signals recorded yet.")
 
-# ═══════════════════════════════════════════════
+
+# =====================================================
 # TAB 2: Performance
-# ═══════════════════════════════════════════════
+# =====================================================
 with tab_perf:
     signals_df = load_signals_log()
     traded = signals_df[signals_df.get("action", pd.Series()) == "TRADE"] if not signals_df.empty and "action" in signals_df.columns else pd.DataFrame()
@@ -367,9 +433,29 @@ with tab_perf:
             </div>
             """, unsafe_allow_html=True)
 
+        # Per-pair performance breakdown
+        st.markdown("### Per-Pair Performance")
+        if "asset" in traded.columns:
+            pair_stats = traded.groupby("asset").agg(
+                trades=("won", "count"),
+                wins=("won", "sum"),
+                win_rate=("won", "mean"),
+            ).reset_index()
+            pair_stats["win_rate"] = (pair_stats["win_rate"] * 100).round(1)
+            pair_stats = pair_stats.sort_values("win_rate", ascending=False)
+
+            st.dataframe(
+                pair_stats.rename(columns={
+                    "asset": "Pair", "trades": "Trades",
+                    "wins": "Wins", "win_rate": "Win Rate %",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+
         # Equity curve
         if "balance" in traded.columns:
-            st.markdown("### 💰 Balance Over Time")
+            st.markdown("### Balance Over Time")
             fig_eq = go.Figure()
             fig_eq.add_trace(go.Scatter(
                 x=traded["time"],
@@ -390,40 +476,20 @@ with tab_perf:
             )
             st.plotly_chart(fig_eq, use_container_width=True)
 
-        # Win/Loss streak
-        if len(traded) > 0:
-            streak_vals = traded["won"].astype(int).values
-            current_streak = 0
-            streak_type = "—"
-            for v in reversed(streak_vals):
-                if current_streak == 0:
-                    current_streak = 1
-                    streak_type = "Win" if v == 1 else "Loss"
-                elif (v == 1 and streak_type == "Win") or (v == 0 and streak_type == "Loss"):
-                    current_streak += 1
-                else:
-                    break
-
-            streak_color = "#00d4aa" if streak_type == "Win" else "#ff4757"
-            st.markdown(
-                f"<div class='metric-box' style='display:inline-block;padding:12px 24px'>"
-                f"<span style='color:{streak_color};font-weight:700;font-size:1.2em'>"
-                f"{current_streak}x {streak_type} Streak</span></div>",
-                unsafe_allow_html=True,
-            )
     else:
         st.info("No trade data available yet. Start trading to see performance.")
 
-# ═══════════════════════════════════════════════
+
+# =====================================================
 # TAB 3: Model Health
-# ═══════════════════════════════════════════════
+# =====================================================
 with tab_health:
     signals_df = load_signals_log()
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown("### 📊 Rolling Win Rate (Last 50 Trades)")
+        st.markdown("### Rolling Win Rate (Last 50 Trades)")
         if not signals_df.empty and "won" in signals_df.columns:
             traded = signals_df[signals_df["action"] == "TRADE"] if "action" in signals_df.columns else signals_df
             if len(traded) >= 10:
@@ -455,7 +521,7 @@ with tab_health:
             st.info("No trade outcome data yet.")
 
     with col2:
-        st.markdown("### 🏆 Top Features")
+        st.markdown("### Top Features")
         feat_imp_path = MODEL_DIR / "feature_importance.csv"
         if feat_imp_path.exists():
             feat_df = pd.read_csv(feat_imp_path)
@@ -479,7 +545,7 @@ with tab_health:
             st.info("Train models to see feature importance.")
 
     # Last retrain info
-    st.markdown("### 🔄 Model Status")
+    st.markdown("### Model Status")
     model_files = list(MODEL_DIR.glob("*.pkl")) if MODEL_DIR.exists() else []
     if model_files:
         latest = max(model_files, key=lambda f: f.stat().st_mtime)
@@ -489,7 +555,7 @@ with tab_health:
         st.warning("No trained models found. Run `python train.py`.")
 
 
-# ─── Auto Refresh ─────────────────────────────────────────────
+# --- Auto Refresh ----------------------------------------------------------
 if auto_refresh:
     time.sleep(DASHBOARD_REFRESH_SECONDS)
     st.rerun()
