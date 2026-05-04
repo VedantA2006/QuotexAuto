@@ -69,9 +69,9 @@ LGBM_PARAMS = {
 
 # ─── CNN Params ───────────────────────────────────────────────
 CNN_SEQUENCE_LENGTH = 20
-CNN_EPOCHS = 100
-CNN_BATCH_SIZE = 64
-CNN_PATIENCE = 10
+CNN_EPOCHS = 30
+CNN_BATCH_SIZE = 128
+CNN_PATIENCE = 5
 CNN_LR = 0.001
 
 # ─── Risk Management ─────────────────────────────────────────
