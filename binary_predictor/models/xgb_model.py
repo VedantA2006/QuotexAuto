@@ -38,26 +38,24 @@ class XGBModel:
         """
         self.feature_names = X_train.columns.tolist()
 
+        # Build clean params — remove keys that aren't XGBClassifier constructor args
+        clean_params = {k: v for k, v in self.params.items()
+                        if k not in ("early_stopping_rounds",)}
+
         # Handle class imbalance
         n_pos = y_train.sum()
         n_neg = len(y_train) - n_pos
         if n_neg > 0:
-            self.params["scale_pos_weight"] = n_neg / n_pos
+            clean_params["scale_pos_weight"] = n_neg / n_pos
 
-        # Extract early_stopping_rounds from params if we don't have validation data
-        early_stopping = self.params.get("early_stopping_rounds", XGB_EARLY_STOPPING)
-        
-        if X_val is not None and y_val is not None:
-            self.params["early_stopping_rounds"] = early_stopping
-        elif "early_stopping_rounds" in self.params:
-            del self.params["early_stopping_rounds"]
-
-        self.model = xgb.XGBClassifier(**self.params)
+        self.model = xgb.XGBClassifier(**clean_params)
 
         fit_params = {}
         if X_val is not None and y_val is not None:
             fit_params["eval_set"] = [(X_val, y_val)]
             fit_params["verbose"] = False
+
+        self.model.set_params(early_stopping_rounds=XGB_EARLY_STOPPING if X_val is not None else None)
 
         self.model.fit(
             X_train, y_train,
@@ -66,10 +64,9 @@ class XGBModel:
 
         self.feature_importances_ = self.model.feature_importances_
 
-        # Restore early_stopping_rounds to params if we removed it
-        self.params["early_stopping_rounds"] = early_stopping
-
-        n_trees = self.model.best_iteration if hasattr(self.model, 'best_iteration') else self.params.get('n_estimators', 0)
+        n_trees = getattr(self.model, 'best_iteration', None)
+        if n_trees is None or n_trees == 0:
+            n_trees = self.model.n_estimators
         logger.info(
             f"XGBoost trained: {n_trees} trees, "
             f"train samples={len(X_train):,}"
